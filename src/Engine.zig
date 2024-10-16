@@ -35,11 +35,17 @@ pub const FdEvents = struct {
 
 pub const FdRegistrationError = error{AlreadyRegistered};
 
+const FdEntry = struct {
+    pollfd: std.posix.pollfd,
+    handler: FdHandler,
+    active: bool = true,
+};
+
 allocator: std.mem.Allocator,
 stopping: bool = false,
 running: bool = false,
-poll_fds: std.ArrayList(std.posix.pollfd),
-handlers: std.ArrayList(FdHandler),
+fds: std.MultiArrayList(FdEntry),
+newly_registered_fds: std.MultiArrayList(FdEntry),
 x: i32,
 
 const Self = @This();
@@ -47,15 +53,15 @@ const Self = @This();
 pub fn init(allocator: std.mem.Allocator) Self {
     return Self{
         .allocator = allocator,
-        .poll_fds = std.ArrayList(std.posix.pollfd).init(allocator),
-        .handlers = std.ArrayList(FdHandler).init(allocator),
+        .fds = std.MultiArrayList(FdEntry){},
+        .newly_registered_fds = std.MultiArrayList(FdEntry){},
         .x = 1,
     };
 }
 
 pub fn deinit(self: *Self) void {
-    self.poll_fds.deinit();
-    self.handlers.deinit();
+    self.fds.deinit(self.allocator);
+    self.newly_registered_fds.deinit(self.allocator);
 }
 
 pub fn start(self: *Self) !void {
@@ -72,9 +78,23 @@ fn run(self: *Self) !void {
     while (!self.stopping) {
         // no work to do
         // TODO: check callbacks
-        if (self.poll_fds.items.len == 0) {
+        if (!self.workToDo()) {
             self.stop();
             break;
+        }
+
+        var idx: usize = 0;
+        while (idx < self.fds.len) {
+            const fd_entry = self.fds.get(idx);
+            if (!fd_entry.active) {
+                self.fds.orderedRemove(idx);
+                continue;
+            }
+            idx += 1;
+        }
+
+        while (self.newly_registered_fds.len > 0) {
+            try self.fds.append(self.allocator, self.newly_registered_fds.pop());
         }
 
         try self.poll();
@@ -82,25 +102,29 @@ fn run(self: *Self) !void {
     self.running = false;
 }
 
+fn workToDo(self: *const Self) bool {
+    return self.fds.len > 0 or self.newly_registered_fds.len > 0;
+}
+
 fn poll(self: *Self) !void {
-    const result = try std.posix.poll(self.poll_fds.items, 0);
+    const result = try std.posix.poll(self.fds.items(.pollfd), 0);
     if (result <= 0) return;
 
     // TODO: better polling behaviour
 
     // readers
-    for (self.poll_fds.items, 0..) |*pfd, idx| {
-        const handler = self.handlers.items[idx];
-        if ((pfd.revents & std.posix.POLL.IN) == 1) {
-            handler.readable();
+    for (0..self.fds.slice().len) |idx| {
+        const entry = self.fds.get(idx);
+        if ((entry.pollfd.revents & std.posix.POLL.IN) == 1) {
+            entry.handler.readable();
         }
     }
 
     // writers
-    for (self.poll_fds.items, 0..) |*pfd, idx| {
-        const handler = self.handlers.items[idx];
-        if ((pfd.revents & std.posix.POLL.OUT) == 1) {
-            handler.writeable();
+    for (0..self.fds.slice().len) |idx| {
+        const entry = self.fds.get(idx);
+        if ((entry.pollfd.revents & std.posix.POLL.OUT) == 1) {
+            entry.handler.writeable();
         }
     }
 }
@@ -109,8 +133,8 @@ pub fn stop(self: *Self) void {
     self.stopping = true;
 }
 
-pub fn register_fd(self: *Self, fd: std.posix.fd_t, handler: FdHandler, events: FdEvents) !void {
-    for (self.poll_fds.items) |*pfd| {
+pub fn registerFd(self: *Self, fd: std.posix.fd_t, handler: FdHandler, events: FdEvents) !void {
+    for (self.fds.items(.pollfd)) |pfd| {
         if (pfd.fd == fd) {
             return FdRegistrationError.AlreadyRegistered;
         }
@@ -124,15 +148,24 @@ pub fn register_fd(self: *Self, fd: std.posix.fd_t, handler: FdHandler, events: 
         poll_events |= std.posix.POLL.OUT;
     }
 
-    try self.poll_fds.append(std.posix.pollfd{
+    try self.newly_registered_fds.append(self.allocator, FdEntry{ .pollfd = std.posix.pollfd{
         .fd = fd,
         .events = poll_events,
         .revents = 0,
-    });
-    try self.handlers.append(handler);
+    }, .handler = handler });
+}
+
+pub fn unregisterFd(self: *Self, fd: std.posix.fd_t) void {
+    for (0..self.fds.len) |idx| {
+        var fd_entry = self.fds.get(idx);
+        if (fd_entry.pollfd.fd == fd) {
+            fd_entry.active = false;
+        }
+        self.fds.set(idx, fd_entry);
+    }
 }
 
 // TODO
-// pub fn update_fd(self: *Self, fd: std.posix.fd_t, events: FdEvents) !void {
+// pub fn updateFdd(self: *Self, fd: std.posix.fd_t, events: FdEvents) !void {
 //
 // }

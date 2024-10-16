@@ -42,6 +42,8 @@ pub fn create(allocator: std.mem.Allocator, af: Socket.AddressFamily, socket_typ
     };
 }
 
+// Closes underlying socket and destroys itself.
+// Not usable after calling close.
 pub fn close(self: *BufferedSocket) void {
     self.sock.close();
     self.allocator.free(self.write_buffer);
@@ -60,6 +62,7 @@ pub fn listen(self: *BufferedSocket) std.posix.ListenError!void {
     try self.sock.listen();
 }
 
+// take ownership of the new buffered socket
 pub fn accept(self: *BufferedSocket) !BufferedSocket {
     const read_buf = try self.allocator.alloc(u8, self.options.buffer_size);
     errdefer self.allocator.free(read_buf);

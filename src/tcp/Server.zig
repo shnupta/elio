@@ -12,42 +12,53 @@ pub const Handler = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        newConnection: *const fn (ctx: *anyopaque, conn: Connection) void,
+        /// take ownership of the new connection
+        newConnection: *const fn (ctx: *anyopaque, conn: *Connection) void,
     };
 
-    pub fn newConnection(self: *Handler, conn: Connection) void {
+    pub fn newConnection(self: *Handler, conn: *Connection) void {
         self.vtable.newConnection(self.ptr, conn);
     }
 };
 
+allocator: std.mem.Allocator,
 socket: BufferedSocket,
 handler: Handler,
 fd_vtable: FdHandler.VTable,
+engine: *Engine,
 
 const fd_vtable = FdHandler.VTable{
     .readable = readable,
     .writeable = writeable,
 };
 
-pub fn init(allocator: std.mem.Allocator, handler: Handler, options: BufferedSocket.Options) !Server {
+pub fn init(allocator: std.mem.Allocator, engine: *Engine, handler: Handler, options: BufferedSocket.Options) !Server {
     return Server{
+        .allocator = allocator,
         .socket = try BufferedSocket.create(allocator, Socket.AddressFamily.ipv4, Socket.Type.tcp, options),
         .handler = handler,
         .fd_vtable = FdHandler.VTable{
             .readable = readable,
             .writeable = writeable,
         },
+        .engine = engine,
     };
 }
 
-pub fn bindAndListen(self: *Server, engine: *Engine, addr: []const u8, port: u16) !void {
-    try self.socket.bind(addr, port);
-    try self.socket.listen();
-    try engine.register_fd(self.socket.fd(), FdHandler{ .ptr = self, .vtable = &fd_vtable }, FdEvents{ .read = true });
+pub fn deinit(self: *Server) void {
+    self.engine.unregisterFd(self.socket.fd());
+    self.socket.close();
 }
 
-fn accept(self: *Server) !Connection {
-    return Connection.create(try self.socket.accept());
+pub fn bindAndListen(self: *Server, addr: []const u8, port: u16) !void {
+    try self.socket.enablePortReuse(true);
+    try self.socket.bind(addr, port);
+    try self.socket.listen();
+    try self.engine.registerFd(self.socket.fd(), FdHandler{ .ptr = self, .vtable = &fd_vtable }, FdEvents{ .read = true });
+}
+
+fn accept(self: *Server) !*Connection {
+    return Connection.create(self.allocator, try self.socket.accept(), self.engine);
 }
 
 fn readable(ctx: *anyopaque) void {
