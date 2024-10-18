@@ -13,11 +13,11 @@ pub const Handler = struct {
 
     pub const VTable = struct {
         /// take ownership of the new connection
-        newConnection: *const fn (ctx: *anyopaque, conn: *Connection) void,
+        newConnection: *const fn (ctx: *anyopaque, server: *Server, conn: *Connection) void,
     };
 
-    pub fn newConnection(self: *Handler, conn: *Connection) void {
-        self.vtable.newConnection(self.ptr, conn);
+    pub fn newConnection(self: *Handler, server: *Server, conn: *Connection) void {
+        self.vtable.newConnection(self.ptr, server, conn);
     }
 };
 
@@ -28,6 +28,7 @@ fd_vtable: FdHandler.VTable,
 engine: *Engine,
 
 const fd_vtable = FdHandler.VTable{
+    .errored = errored,
     .readable = readable,
     .writeable = writeable,
 };
@@ -37,10 +38,7 @@ pub fn init(allocator: std.mem.Allocator, engine: *Engine, handler: Handler, opt
         .allocator = allocator,
         .socket = try BufferedSocket.create(allocator, Socket.AddressFamily.ipv4, Socket.Type.tcp, options),
         .handler = handler,
-        .fd_vtable = FdHandler.VTable{
-            .readable = readable,
-            .writeable = writeable,
-        },
+        .fd_vtable = fd_vtable,
         .engine = engine,
     };
 }
@@ -58,17 +56,19 @@ pub fn bindAndListen(self: *Server, addr: []const u8, port: u16) !void {
 }
 
 fn accept(self: *Server) !*Connection {
-    return Connection.create(self.allocator, try self.socket.accept(), self.engine);
+    return Connection.createConnected(self.allocator, self.engine, try self.socket.accept());
 }
 
-fn readable(ctx: *anyopaque) void {
+fn errored(_: *anyopaque, _: std.posix.fd_t) void {}
+
+fn readable(ctx: *anyopaque, _: std.posix.fd_t) void {
     var self: *Server = @alignCast(@ptrCast(ctx));
     const conn = self.accept() catch {
         return;
     };
-    self.handler.newConnection(conn);
+    self.handler.newConnection(self, conn);
 }
 
-fn writeable(_: *anyopaque) void {}
+fn writeable(_: *anyopaque, _: std.posix.fd_t) void {}
 
 const Server = @This();

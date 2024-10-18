@@ -15,16 +15,21 @@ pub const FdHandler = struct {
     // on errors
     // or i just panic
     pub const VTable = struct {
-        readable: *const fn (ctx: *anyopaque) void,
-        writeable: *const fn (ctx: *anyopaque) void,
+        errored: *const fn (ctx: *anyopaque, fd: std.posix.fd_t) void,
+        readable: *const fn (ctx: *anyopaque, fd: std.posix.fd_t) void,
+        writeable: *const fn (ctx: *anyopaque, fd: std.posix.fd_t) void,
     };
 
-    pub fn readable(self: *const FdHandler) void {
-        self.vtable.readable(self.ptr);
+    pub fn errored(self: *const FdHandler, fd: std.posix.fd_t) void {
+        self.vtable.errored(self.ptr, fd);
     }
 
-    pub fn writeable(self: *const FdHandler) void {
-        self.vtable.writeable(self.ptr);
+    pub fn readable(self: *const FdHandler, fd: std.posix.fd_t) void {
+        self.vtable.readable(self.ptr, fd);
+    }
+
+    pub fn writeable(self: *const FdHandler, fd: std.posix.fd_t) void {
+        self.vtable.writeable(self.ptr, fd);
     }
 };
 
@@ -97,6 +102,9 @@ fn run(self: *Self) !void {
             try self.fds.append(self.allocator, self.newly_registered_fds.pop());
         }
 
+        // TODO: add some timing here so that we only poll every Xms
+        // obvs still process any callbacks and alarms if we have them
+
         try self.poll();
     }
     self.running = false;
@@ -110,21 +118,18 @@ fn poll(self: *Self) !void {
     const result = try std.posix.poll(self.fds.items(.pollfd), 0);
     if (result <= 0) return;
 
-    // TODO: better polling behaviour
-
-    // readers
     for (0..self.fds.slice().len) |idx| {
         const entry = self.fds.get(idx);
-        if ((entry.pollfd.revents & std.posix.POLL.IN) == 1) {
-            entry.handler.readable();
+        if ((entry.pollfd.revents & std.posix.POLL.ERR) > 0) {
+            entry.handler.errored(entry.pollfd.fd);
+            continue;
         }
-    }
-
-    // writers
-    for (0..self.fds.slice().len) |idx| {
-        const entry = self.fds.get(idx);
-        if ((entry.pollfd.revents & std.posix.POLL.OUT) == 1) {
-            entry.handler.writeable();
+        if ((entry.pollfd.revents & std.posix.POLL.OUT) > 0) {
+            entry.handler.writeable(entry.pollfd.fd);
+            if (!entry.active) continue;
+        }
+        if ((entry.pollfd.revents & std.posix.POLL.IN) > 0) {
+            entry.handler.readable(entry.pollfd.fd);
         }
     }
 }
@@ -153,6 +158,22 @@ pub fn registerFd(self: *Self, fd: std.posix.fd_t, handler: FdHandler, events: F
         .events = poll_events,
         .revents = 0,
     }, .handler = handler });
+}
+
+pub fn updateFd(self: *Self, fd: std.posix.fd_t, events: FdEvents) void {
+    for (self.fds.items(.pollfd)) |*pfd| {
+        if (pfd.fd == fd) {
+            var poll_events: i16 = std.posix.POLL.ERR;
+            if (events.read) {
+                poll_events |= std.posix.POLL.IN;
+            }
+            if (events.write) {
+                poll_events |= std.posix.POLL.OUT;
+            }
+            pfd.events = poll_events;
+            return;
+        }
+    }
 }
 
 pub fn unregisterFd(self: *Self, fd: std.posix.fd_t) void {
